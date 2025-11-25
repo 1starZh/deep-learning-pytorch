@@ -143,6 +143,39 @@ class GaussianDiffusion(nn.Module):
         
         return self.get_losses(x, t, y)
     
+    @torch.no_grad()
+    def sample_ddim(self, batch_size, device, y=None, use_ema=True, ddim_steps=20, eta=0.0):
+        if y is not None and batch_size != len(y):
+            raise ValueError("sample batch size different from length of given y")
+        x = torch.randn(batch_size, self.img_channels, *self.img_size, device=device)
+        t_ddim = torch.from_numpy(np.linspace(0, self.num_timestep - 1, ddim_steps).astype(int)).to(device)
+        alphas_cumprod = self.alphas_cumprod
+        ddim_alphas = alphas_cumprod[t_ddim]
+        ddim_sqrt_one_minus_alphas = torch.sqrt(1.0 - ddim_alphas)
+
+        ddim_alphas_prev = torch.cat([alphas_cumprod[0:1], ddim_alphas[:-1]])
+        ddim_sigmas = eta * torch.sqrt(
+            (1.0 - ddim_alphas_prev) / (1.0 - ddim_alphas) * 
+            (1.0 - ddim_alphas / ddim_alphas_prev)
+        )
+        model = self.ema_model if use_ema else self.model
+        
+        for i in range(ddim_steps - 1, -1, -1):
+            t = t_ddim[i].repeat(batch_size)
+            alpha = ddim_alphas[i]
+            sqrt_one_minus_alphas = ddim_sqrt_one_minus_alphas[i]
+
+            pred_noise = model(x, t, y)
+            x0_pred = (x - sqrt_one_minus_alphas * pred_noise) / torch.sqrt(alpha)
+            
+            if i > 0:
+                sigma = ddim_sigmas[i]
+                noise = torch.randn_like(x)
+                x = torch.sqrt(ddim_alphas_prev[i]) * x0_pred + torch.sqrt(1 - ddim_alphas_prev[i] - sigma**2) * pred_noise + sigma * noise
+            else:
+                x = x0_pred
+        return x
+            
 def generate_cosine_schedule(T, s=0.008):
     def f(t, T):
         return (np.cos((t / T + s) / (1 + s) * np.pi / 2)) ** 2
